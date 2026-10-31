@@ -35,8 +35,12 @@ Options: --details flagged/all/none, --no-overviews, --plot-columns 8.
   times, physical attribute and XYZ labels, transitions, summaries and QC.
 - outputs/data_preprocessing/pricing_endpoint_qc.csv: terminal arc endpoint times,
   duration, side, sample count, visits, candidate flag, raw timestamps, response.
-- outputs/data_preprocessing/gaze_qc/: one 40-trial overview PNG per session, plus
-  individual images of flagged or all trials.
+- outputs/data_preprocessing/gaze_qc/subject_<ID>/session_<ORDER>_<TASK>/overview.png:
+  one 40-trial overview per session.
+- outputs/data_preprocessing/gaze_qc/subject_<ID>/session_<ORDER>_<TASK>/trials/trial_<N>.png:
+  detailed plots for flagged or all trials.
+- Any previously generated flat PNGs at the gaze_qc root are preserved under
+  the appropriate session's legacy/ folder when step 2 starts.
 
 ## AOIs and timing
 
@@ -64,8 +68,20 @@ with click annulus strictly 100<r<200px. Preference +/-100 lies on radial
 lines at +/-72 degrees from the vertical. Gaze within 60px of either endpoint
 ray is marked near-endpoint, even slightly outside the clickable annulus.
 
-Within the final 1200ms of raw gaze, identify near-endpoint visits. A
-candidate requires >=5 gaze samples and >=80ms per qualifying visit, its last
+The detector runs ONLY when the trial is pricing AND the absolute reported
+preference, normalized to a 100-point maximum, is STRICTLY GREATER than 90.
+The original PTB_v4/main_price.m stores signed preference -100..+100, so its
+default normalization does not change numeric values. At 90 or less, or
+when preference is missing, endpoint screening is skipped. Raw gaze and
+attribute AOI sequences are still extracted normally.
+
+New QC columns: price_response_100, price_abs_100,
+endpoint_detection_eligible, endpoint_detection_status. The candidate flag
+is 0 for skipped trials; endpoint_pattern is not_screened.
+Optional switches: --endpoint-min-abs-price-100 90 and --price-scale-max 100.
+
+Within the final 1200ms of raw gaze (only eligible trials), identify
+near-endpoint visits. A candidate requires >=5 gaze samples and >=80ms per qualifying visit, its last
 qualifying visit ending within 250ms of the last gaze sample, and either one
 >=300ms sustained visit or two qualifying visits near the same endpoint.
 All visits, with raw and relative start/end times and side, are preserved
