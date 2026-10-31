@@ -219,6 +219,23 @@ def one_trial(meta,behavior,raw,D,args):
              xyz_map=int(meta.xyz_map),cond_pos=int(meta.cond_pos),
              xyz_to_attribute=xyz,pos_to_attribute=pos,aoi_mode=args.aoi_mode)
     row.update({("rt_seconds" if col=="rt" else col):numerical(behavior[col]) if col in behavior else np.nan for col in FIELDS})
+    # PTB_v4/main_price.m stores preference on a signed -100..+100 scale.
+    # Use the explicitly declared source scale, never infer it from each trial.
+    response=row["choice"]
+    score100=(100.0*response/args.price_scale_max) if pricing and np.isfinite(response) else np.nan
+    absolute_score100=abs(score100) if np.isfinite(score100) else np.nan
+    eligible=(pricing and np.isfinite(absolute_score100)
+              and absolute_score100>args.endpoint_min_abs_price_100
+              and absolute_score100<=100.0)
+    row["price_response_100"]=score100
+    row["price_abs_100"]=absolute_score100
+    row["endpoint_detection_eligible"]=int(eligible)
+    row["endpoint_detection_status"]=(
+        "not_pricing" if not pricing else
+        "missing_preference" if not np.isfinite(absolute_score100) else
+        "invalid_preference_over_100" if absolute_score100>100 else
+        "eligible" if eligible else "skipped_abs_preference_at_most_threshold"
+    )
     for i,letter in enumerate("XYZ"):
         row["D_"+letter]=float(D[trial-1,i]) if 1<=trial<=len(D) else np.nan
     if raw is None:
@@ -239,7 +256,7 @@ def one_trial(meta,behavior,raw,D,args):
         gaze["rel_ms"]=t;gaze["duration_ms"]=duration
         gaze["aoi_code"]=[classify(x,y,xc,yc,args.aoi_mode,args.aoi_padding_px,pricing)
                           for x,y in zip(gaze.selected_x_norm,gaze.selected_y_norm)]
-        if pricing:
+        if eligible:
             gaze["endpoint_side"]=[endpoint_side(x*2*xc,y*2*yc,xc,yc,args.endpoint_radius_px)
                         for x,y in zip(gaze.selected_x_norm,gaze.selected_y_norm)]
         else:gaze["endpoint_side"]=0
@@ -279,9 +296,12 @@ def one_trial(meta,behavior,raw,D,args):
     for i in (1,2,3):
         for j in range(i+1,4):
             row["trans_"+NAME[NUM[pos[i-1]]]+"_"+NAME[NUM[pos[j-1]]]]=trans.get((i,j),0)
-    row.update(endpoint_qc(gaze,xc,yc,args) if pricing else endpoint_qc(pd.DataFrame(),xc,yc,args))
+    # Endpoint screening is run ONLY for pricing responses with |score100| > threshold.
+    row.update(endpoint_qc(gaze if eligible else pd.DataFrame(),xc,yc,args))
+    if not eligible:
+        row["endpoint_pattern"]="not_screened"
     row["endpoint_response_abs"]=abs(row["choice"]) if np.isfinite(row["choice"]) else np.nan
-    row["endpoint_response_near_100"]=int(pricing and np.isfinite(row["choice"]) and abs(row["choice"])>=95)
+    row["endpoint_response_near_100"]=int(eligible)
     row["endpoint_interpretation"]="near_end_gaze_only_not_mouse_clicks"
     return row,gaze,raw_runs
 
@@ -362,7 +382,8 @@ def overview(meta,items,args,out):
                fontsize=8,frameon=False,bbox_to_anchor=(.5,.978))
     fig.suptitle(f"Subject {meta.subject_id} | session {meta.session_order} | {meta.response_type} | node1={meta.node1_importance_code}, node2={meta.node2_correlation_code} | AOI={args.aoi_mode}",fontsize=11,y=.999)
     fig.subplots_adjust(left=.015,right=.99,bottom=.02,top=.925,wspace=.13,hspace=.32)
-    fn=out/f"subject_{meta.subject_id}_session_{int(meta.session_order):02d}_{meta.response_type}_all_trials.png"
+    out.mkdir(parents=True,exist_ok=True)
+    fn=out/"overview.png"
     fig.savefig(fn,dpi=args.plot_dpi);plt.close(fig)
     print("  saved",fn)
 
@@ -373,8 +394,38 @@ def detail_plot(meta,row,gaze,runs,args,out):
     text=f"endpoint={row['endpoint_pattern']} / {row['endpoint_side']} | visits={row['endpoint_n_visits']} | start={row['endpoint_start_ms']} ms, end={row['endpoint_end_ms']} ms, gap={row['endpoint_gap_before_end_ms']} ms"
     fig.text(.035,.04,text,fontsize=10)
     fig.tight_layout(rect=(0,.075,1,1))
-    name=out/f"subject_{meta.subject_id}_session_{int(meta.session_order):02d}_trial_{int(row['trial']):02d}.png"
+    out.mkdir(parents=True,exist_ok=True)
+    name=out/f"trial_{int(row['trial']):02d}.png"
     fig.savefig(name,dpi=args.plot_dpi);plt.close(fig)
+
+
+def migrate_flat_figures(plots, sessions):
+    """Preserve existing flat PNGs within a per-session legacy subfolder."""
+    import re
+    mapping={(str(row.subject_id),int(row.session_order)):str(row.response_type)
+             for _,row in sessions.iterrows()}
+    pattern=re.compile(
+        r"^subject_(.+)_session_(\d+)_(?:(choice|pricing)_all_trials|trial_(\d+))\.png$"
+    )
+    count=0
+    for old in plots.glob("*.png"):
+        match=pattern.fullmatch(old.name)
+        if not match:
+            continue
+        subject,order,task,_=match.groups()
+        task=task or mapping.get((subject,int(order)))
+        if not task:
+            continue
+        destination=(plots/f"subject_{subject}"/f"session_{int(order):02d}_{task}"/
+                     "legacy"/old.name)
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        if destination.exists():
+            print(f"[WARNING] Flat image not migrated (destination exists): {old}")
+            continue
+        old.rename(destination)
+        count+=1
+    if count:
+        print(f"Reorganized {count} previous flat PNGs into per-session legacy folders.")
 
 
 def main():
@@ -390,6 +441,10 @@ def main():
     p.add_argument("--max-gap-ms",type=float,default=75)
     p.add_argument("--smooth-one-frame",action=argparse.BooleanOptionalAction,default=True)
     p.add_argument("--endpoint-window-ms",type=float,default=1200)
+    p.add_argument("--price-scale-max",type=float,default=100,
+                   help="Positive maximum absolute preference in input (PTB_v4: 100).")
+    p.add_argument("--endpoint-min-abs-price-100",type=float,default=90,
+                   help="Only screen pricing trials with absolute preference on 100-point scale STRICTLY greater than this.")
     p.add_argument("--endpoint-radius-px",type=float,default=60)
     p.add_argument("--endpoint-min-visit-ms",type=float,default=80)
     p.add_argument("--endpoint-min-samples",type=int,default=5)
@@ -400,17 +455,23 @@ def main():
     p.add_argument("--details",choices=("flagged","all","none"),default="flagged")
     p.add_argument("--no-overviews",action="store_true")
     args=p.parse_args()
+    if not np.isfinite(args.price_scale_max) or args.price_scale_max<=0:
+        p.error("--price-scale-max must be positive.")
+    if not 0<=args.endpoint_min_abs_price_100<=100:
+        p.error("--endpoint-min-abs-price-100 must be between 0 and 100.")
     out=args.output_dir.resolve()
     if not out.is_relative_to((ROOT/"outputs").resolve()):
         p.error("All generated files must be under repository outputs/")
     if not args.session_summary.is_file():p.error("Run step 1 first")
     sessions=pd.read_csv(args.session_summary,dtype={"subject_id":str},keep_default_na=False)
+    all_sessions=sessions.copy()
     if args.subject:sessions=sessions[sessions.subject_id==args.subject]
     sessions=sessions.sort_values(by=["subject_id","session_order"])
     if args.max_sessions:sessions=sessions.head(args.max_sessions)
     if sessions.empty:p.error("No sessions to process")
     out.mkdir(parents=True,exist_ok=True)
     plots=out/"gaze_qc";plots.mkdir(exist_ok=True)
+    migrate_flat_figures(plots,all_sessions)
     rows=[]
     for _,meta in sessions.iterrows():
         stem=Path(meta.source_file).stem
@@ -428,15 +489,19 @@ def main():
             row,g,runs=one_trial(meta,b,grouped.get(int(b["trial"])),D,args)
             rows.append(row);items.append((row,g,runs))
         print(f"Subject {meta.subject_id} session {meta.session_order}: {len(items)} trials, {sum(x[0]['endpoint_candidate_flag'] for x in items)} suspected endpoints")
-        if not args.no_overviews:overview(meta,items,args,plots)
+        session_plots=(plots/f"subject_{meta.subject_id}"/
+                       f"session_{int(meta.session_order):02d}_{meta.response_type}")
+        if not args.no_overviews:
+            overview(meta,items,args,session_plots)
         if args.details!="none":
             for row,g,runs in items:
                 if args.details=="all" or row["endpoint_candidate_flag"]:
-                    detail_plot(meta,row,g,runs,args,plots)
+                    detail_plot(meta,row,g,runs,args,session_plots/"trials")
     summary=pd.DataFrame(rows)
     summary.to_csv(out/"trial_summary.csv",index=False,encoding="utf-8-sig")
     cols=["subject_id","session_order","trial","choice","rt_seconds",
-          "endpoint_candidate_flag","endpoint_response_near_100",
+          "price_response_100","price_abs_100","endpoint_detection_eligible",
+          "endpoint_detection_status","endpoint_candidate_flag","endpoint_response_near_100",
           "endpoint_pattern","endpoint_side","endpoint_start_ms","endpoint_end_ms",
           "endpoint_start_timestamp_us","endpoint_end_timestamp_us",
           "endpoint_duration_ms","endpoint_span_ms","endpoint_gap_before_end_ms",
