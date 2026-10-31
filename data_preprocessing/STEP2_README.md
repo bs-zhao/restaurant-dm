@@ -35,6 +35,15 @@ Options: --details flagged/all/none, --no-overviews, --plot-columns 8.
   times, physical attribute and XYZ labels, transitions, summaries and QC.
 - outputs/data_preprocessing/pricing_endpoint_qc.csv: terminal arc endpoint times,
   duration, side, sample count, visits, candidate flag, raw timestamps, response.
+- outputs/data_preprocessing/session_endpoint_qc.csv: one row for every processed
+  session (including choice sessions), with n_endpoint_detection_triggered
+  counting trials that ENTERED the >90 pricing endpoint screen,
+  n_endpoint_candidates counting trials flagged by the gaze detector, the
+  trial indices of each group in JSON arrays, and counts of reasons for
+  skipping detection. It also reports n_triggered_with_no_gaze.
+  This is separate from the step-1 session_summary.csv and is regenerated
+  whenever step 2 runs. For --subject/--max-sessions, only processed sessions
+  are included.
 - outputs/data_preprocessing/gaze_qc/subject_<ID>/session_<ORDER>_<TASK>/overview.png:
   one 40-trial overview per session.
 - outputs/data_preprocessing/gaze_qc/subject_<ID>/session_<ORDER>_<TASK>/trials/trial_<N>.png:
