@@ -24,6 +24,8 @@ NAME = re.compile(r"^infos_(choice|price)_(\d+)_(\d+)_(.+)\.mat$", re.I)
 XYZ = {1: "MRD", 2: "MDR", 3: "RMD", 4: "RDM", 5: "DMR", 6: "DRM"}
 POSITION = {1: "MRD", 2: "MDR", 3: "RDM", 4: "RMD", 5: "DMR", 6: "DRM"}
 ATTRIBUTE = {"M": "money", "R": "rating", "D": "distance"}
+IMPORTANCE = {1: "balanced", 2: "X_dominant"}
+CORRELATION = {1: "uncorrelated", 2: "YZ_aligned", 3: "XZ_aligned"}
 CONDITIONS = {
     (1, 1): (1, "balanced", "uncorrelated"),
     (2, 1): (2, "X_dominant", "uncorrelated"),
@@ -81,15 +83,21 @@ def summarize(path, input_dir):
     pos_code = int(scalar(getattr(infos, "cond_pos", None), -1))
     xyz = XYZ.get(map_code, "")
     pos = POSITION.get(pos_code, "")
-    cid, importance, correlation = CONDITIONS.get((n1, n2), ("", "unknown", "unknown"))
+    cid, _, _ = CONDITIONS.get((n1, n2), ("", "", ""))
+    importance = IMPORTANCE.get(n1, "undefined_in_uploaded_PTB_v4")
+    correlation = CORRELATION.get(n2, "undefined_in_uploaded_PTB_v4")
     issues = []
     subject = str(scalar(getattr(infos, "subj_id", None), file_subject))
     if subject != file_subject:
         issues.append("subject_filename_mismatch")
     if (n1, n2) != (int(file_n1), int(file_n2)):
         issues.append("condition_filename_mismatch")
-    if not cid:
-        issues.append("unexpected_importance_correlation_combination")
+    if n1 not in IMPORTANCE:
+        issues.append("node1_not_implemented_in_uploaded_PTB_v4")
+    if n2 not in CORRELATION:
+        issues.append("node2_not_implemented_in_uploaded_PTB_v4")
+    if not cid and n1 in IMPORTANCE and n2 in CORRELATION:
+        issues.append("importance_correlation_pair_not_in_five_condition_design")
     if not xyz:
         issues.append("unknown_xyz_map")
     if not pos:
@@ -103,6 +111,8 @@ def summarize(path, input_dir):
         "response_type": "choice" if task.lower() == "choice" else "pricing",
         "response_scale": "-1_or_+1" if task.lower() == "choice" else "-100_to_+100",
         "condition_id": cid,
+        "condition_in_five_condition_design": int(bool(cid)),
+        "importance_filter_implemented_in_uploaded_PTB_v4": int(n1 in IMPORTANCE),
         "node1_importance_code": n1,
         "importance": importance,
         "node2_correlation_code": n2,
@@ -157,7 +167,8 @@ def summarize(path, input_dir):
         "p_all_three_same_sign", "mean_abs_X", "mean_abs_Y", "mean_abs_Z",
         "mean_X", "mean_Y", "mean_Z", "mean_abs_X_minus_max_YZ",
         "p_X_largest_abs", "p_balanced_within_0p2", "p_abs_sum_D_le_0p5",
-        "mean_abs_sum_D", "max_abs_sum_D",
+        "mean_abs_sum_D", "max_abs_sum_D", "p_X_dominant_full_rule",
+        "n_trials_any_abs_D_gt_1p5",
     )
     row.update({name: "" for name in metrics})
     if d.ndim == 2 and d.shape[1] == 3 and len(d):
@@ -186,6 +197,8 @@ def summarize(path, input_dir):
                 "p_abs_sum_D_le_0p5": float(np.mean(np.abs(sum_d) <= 0.5 + 1e-9)),
                 "mean_abs_sum_D": float(np.abs(sum_d).mean()),
                 "max_abs_sum_D": float(np.abs(sum_d).max()),
+                "p_X_dominant_full_rule": float(np.mean((ax-ay >= 0.2-1e-9) & (ax-az >= 0.2-1e-9) & (np.abs(ay-az) < 0.2))),
+                "n_trials_any_abs_D_gt_1p5": int(np.sum((np.abs(good) > 1.5+1e-9).any(axis=1))),
             })
     row["validation_warnings"] = ";".join(issues)
     return row
