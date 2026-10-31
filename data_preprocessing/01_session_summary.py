@@ -4,7 +4,8 @@ Input:  <repo>/data/raw_use/infos_{choice|price}_{node1}_{node2}_{subject}.mat
 Output: <repo>/outputs/data_preprocessing/session_summary.csv
 
 Requires: numpy, scipy. MATLAB MCOS table/GazeData contents are NOT decoded.
-The session order is inferred from MAT-file header timestamps, not block IDs.
+Sessions are sorted within participant by MATLAB MAT-file save time (a proxy for
+completion time); this is not a timestamp of the final behavioral response.
 """
 
 from __future__ import annotations
@@ -104,8 +105,8 @@ def summarize(path, input_dir):
         issues.append("unknown_cond_pos")
     row = {
         "subject_id": subject,
-        "session_index_inferred": "",  # populated after sorting MAT-file timestamps
-        "session_timestamp_local_unspecified": matlab_header_time(data.get("__header__", b"")),
+        "session_order": "",  # 1-based within-participant chronological rank
+        "mat_saved_at": matlab_header_time(data.get("__header__", b"")),
         "source_file": path.relative_to(input_dir).as_posix(),
         "file_size_mb": round(path.stat().st_size / (1024**2), 3),
         "response_type": "choice" if task.lower() == "choice" else "pricing",
@@ -200,6 +201,8 @@ def summarize(path, input_dir):
                 "p_X_dominant_full_rule": float(np.mean((ax-ay >= 0.2-1e-9) & (ax-az >= 0.2-1e-9) & (np.abs(ay-az) < 0.2))),
                 "n_trials_any_abs_D_gt_1p5": int(np.sum((np.abs(good) > 1.5+1e-9).any(axis=1))),
             })
+    if not row["mat_saved_at"]:
+        issues.append("missing_mat_save_time_session_order_unverified")
     row["validation_warnings"] = ";".join(issues)
     return row
 
@@ -226,17 +229,24 @@ def main():
         except Exception as exc:
             print(f"[ERROR] {path.name}: {exc}")
             raise SystemExit(1) from exc
-    rows.sort(key=lambda r: (r["subject_id"], r["session_timestamp_local_unspecified"] or "9999", r["source_file"]))
+    # Group each participant; use MAT-header save time as the best available
+    # estimate of completion order, not filename or condition code.
+    rows.sort(key=lambda r: (
+        (0, int(r["subject_id"])) if r["subject_id"].isdigit() else (1, r["subject_id"]),
+        r["mat_saved_at"] or "9999",
+        r["source_file"],
+    ))
     counts = Counter()
     for row in rows:
         counts[row["subject_id"]] += 1
-        row["session_index_inferred"] = counts[row["subject_id"]]
+        row["session_order"] = counts[row["subject_id"]]
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
     print(f"Saved {len(rows)} sessions from {len(counts)} participants -> {out}")
+    print("Sessions sorted by participant then MAT-file save time; session_order starts at 1 for each participant.")
     print("MATLAB MCOS table and GazeData values were not decoded; gaze counts represent containers only.")
     for row in rows:
         if row["validation_warnings"]:
