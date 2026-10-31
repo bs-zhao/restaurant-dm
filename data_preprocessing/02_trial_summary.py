@@ -473,6 +473,7 @@ def main():
     plots=out/"gaze_qc";plots.mkdir(exist_ok=True)
     migrate_flat_figures(plots,all_sessions)
     rows=[]
+    session_qc_rows=[]
     for _,meta in sessions.iterrows():
         stem=Path(meta.source_file).stem
         behavior_path=args.exports/(stem+"_behavior.csv")
@@ -488,7 +489,39 @@ def main():
         for _,b in behavior.iterrows():
             row,g,runs=one_trial(meta,b,grouped.get(int(b["trial"])),D,args)
             rows.append(row);items.append((row,g,runs))
-        print(f"Subject {meta.subject_id} session {meta.session_order}: {len(items)} trials, {sum(x[0]['endpoint_candidate_flag'] for x in items)} suspected endpoints")
+        # Record trial eligibility separately from an actual endpoint anomaly.
+        trial_rows=[item[0] for item in items]
+        screened=[int(r["trial"]) for r in trial_rows if r["endpoint_detection_eligible"]]
+        flagged=[int(r["trial"]) for r in trial_rows if r["endpoint_candidate_flag"]]
+        statuses=Counter(r["endpoint_detection_status"] for r in trial_rows)
+        session_qc_rows.append({
+            "subject_id":str(meta.subject_id),
+            "session_order":int(meta.session_order),
+            "source_file":str(meta.source_file),
+            "response_type":str(meta.response_type),
+            "node1":int(meta.node1_importance_code),
+            "node2":int(meta.node2_correlation_code),
+            "n_trials":len(trial_rows),
+            "endpoint_min_abs_price_100":args.endpoint_min_abs_price_100,
+            "n_endpoint_detection_triggered":len(screened),
+            "endpoint_detection_trial_indices":json.dumps(screened),
+            "n_endpoint_candidates":len(flagged),
+            "endpoint_candidate_trial_indices":json.dumps(flagged),
+            "n_triggered_with_no_gaze":sum(
+                r["endpoint_detection_eligible"] and r["n_gaze_samples"]==0
+                for r in trial_rows),
+            "n_skipped_abs_preference_at_most_threshold":
+                statuses["skipped_abs_preference_at_most_threshold"],
+            "n_skipped_missing_preference":statuses["missing_preference"],
+            "n_skipped_invalid_preference":statuses["invalid_preference_over_100"],
+            "n_not_pricing":statuses["not_pricing"],
+        })
+        print(
+            f"Subject {meta.subject_id} session {meta.session_order} "
+            f"({meta.response_type}): {len(items)} trials; "
+            f"endpoint detection triggered={len(screened)}, "
+            f"suspected endpoints={len(flagged)}"
+        )
         session_plots=(plots/f"subject_{meta.subject_id}"/
                        f"session_{int(meta.session_order):02d}_{meta.response_type}")
         if not args.no_overviews:
@@ -499,6 +532,11 @@ def main():
                     detail_plot(meta,row,g,runs,args,session_plots/"trials")
     summary=pd.DataFrame(rows)
     summary.to_csv(out/"trial_summary.csv",index=False,encoding="utf-8-sig")
+    # One row per processed session, including choice sessions with 0 triggers.
+    session_qc=pd.DataFrame(session_qc_rows)
+    session_qc.to_csv(
+        out/"session_endpoint_qc.csv",index=False,encoding="utf-8-sig"
+    )
     cols=["subject_id","session_order","trial","choice","rt_seconds",
           "price_response_100","price_abs_100","endpoint_detection_eligible",
           "endpoint_detection_status","endpoint_candidate_flag","endpoint_response_near_100",
@@ -510,6 +548,12 @@ def main():
     summary.loc[summary.response_type=="pricing",cols].to_csv(
            out/"pricing_endpoint_qc.csv",index=False,encoding="utf-8-sig")
     print(f"Done: {len(summary)} trial rows -> {out/'trial_summary.csv'}")
+    print(
+        f"Endpoint QC: {len(session_qc)} sessions, "
+        f"{int(session_qc['n_endpoint_detection_triggered'].sum())} trials screened, "
+        f"{int(session_qc['n_endpoint_candidates'].sum())} suspected; "
+        f"saved -> {out/'session_endpoint_qc.csv'}"
+    )
 
 
 if __name__=="__main__":
