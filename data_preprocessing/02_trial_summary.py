@@ -406,7 +406,7 @@ def main():
     if not args.session_summary.is_file():p.error("Run step 1 first")
     sessions=pd.read_csv(args.session_summary,dtype={"subject_id":str},keep_default_na=False)
     if args.subject:sessions=sessions[sessions.subject_id==args.subject]
-    sessions=sessions.sort_values(("subject_id","session_order"))
+    sessions=sessions.sort_values(by=["subject_id","session_order"])
     if args.max_sessions:sessions=sessions.head(args.max_sessions)
     if sessions.empty:p.error("No sessions to process")
     out.mkdir(parents=True,exist_ok=True)
