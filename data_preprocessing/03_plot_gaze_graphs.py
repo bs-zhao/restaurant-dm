@@ -17,9 +17,10 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyArrowPatch
+from matplotlib.patches import FancyArrowPatch, Circle
 import numpy as np
 import pandas as pd
+from scipy.stats import t as student_t
 
 ROOT = Path(__file__).resolve().parents[1]
 ATTR = {"M": "money", "R": "rating", "D": "distance"}
@@ -128,6 +129,37 @@ def avg_metrics(items):
     return mean_dict([a for a, b in items]), mean_dict([b for a, b in items])
 
 
+def mean_ci(ds):
+    """Two-sided 95% Student-t CI across independent units (trials or people)."""
+    mean = mean_dict(ds)
+    low, high = {}, {}
+    for k, m in mean.items():
+        v = np.asarray([d.get(k, 0.) for d in ds], float)
+        if len(v) < 2:
+            low[k] = high[k] = None
+        else:
+            half = float(student_t.ppf(.975, len(v)-1) * v.std(ddof=1)/np.sqrt(len(v)))
+            low[k], high[k] = float(m-half), float(m+half)
+    return mean, low, high
+
+
+def difference(a, b):
+    return {k: float(a.get(k, 0.)-b.get(k, 0.)) for k in sorted(set(a)|set(b))}
+
+
+def condition_annotation(family, c):
+    if family == "pooled":
+        return "Important: mixed | correlated: mixed"
+    if family == "abstract":
+        important = "X" if int(c) in (2,4,5) else "none (balanced)"
+        correlated = {1:"none",2:"none",3:"Y-Z",4:"Y-Z",5:"X-Z"}[int(c)]
+    else:
+        important, pair = str(c).split("__")
+        important = "none (balanced)" if important == "balanced" else important.title()
+        correlated = "none" if pair == "uncorrelated" else pair.replace("_aligned","").replace("_","-").title()
+    return f"Important: {important}\nCorrelated: {correlated}"
+
+
 def save_csv(rows, path):
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
@@ -149,34 +181,138 @@ def clean_axis(ax):
     ax.axis("off")
 
 
-def draw_average(ax, task, mode, times, edges, title, time_max, edge_max):
-    pos = positions(task, mode)
+def draw_average(ax, task, mode, times, edges, title, time_max, edge_max,
+                 ci_low=None, ci_high=None, contrast=False, annotation="", fontsize=8):
+    """Fixed data-coordinate geometry: labels never depend on marker size.
+
+    A shared power scale increases visible size contrasts; signed contrasts
+    use magnitude for size/width, muted blue vs rust for direction.
+    """
+    pos = dict(zip(nodes(task, mode), ((0.,1.05),(-1.22,-.86),(1.22,-.86),(0.,-.02))))
+    ci_low, ci_high = ci_low or {}, ci_high or {}
+    def tone(v):
+        return ("#526F89" if v>0 else "#B17A64" if v<0 else "#C8CDD2") if contrast else "#72889A"
     for pair, value in edges.items():
-        a, b = pair.split("|")
+        a,b = pair.split("|")
         if a not in pos or b not in pos:
             continue
-        x1, y1 = pos[a]
-        x2, y2 = pos[b]
-        if value > 0:
-            ax.plot([x1, x2], [y1, y2], lw=7*value/max(edge_max, 1e-12),
-                    color="#8B939F", alpha=.8, solid_capstyle="round", zorder=1)
-        else:
-            ax.plot([x1, x2], [y1, y2], lw=.45, ls=":", color="#CBD0D5", zorder=1)
-        ax.text((x1+x2)/2, (y1+y2)/2, f"{value:.2f}", fontsize=8,
-                ha="center", va="center", zorder=4,
-                bbox=dict(fc="white", ec="none", pad=1.3, alpha=.93))
-    for n, (x, y) in pos.items():
-        value = times.get(n, 0.)
-        # Scatter marker area is proportional to duration (zero gets a hollow dot).
-        ax.scatter(x, y, s=max(25, 2600*value/max(time_max, 1e-12)),
-                   facecolor=COLORS[n] if value > 0 else "white",
-                   edgecolor=COLORS[n], lw=1.5, zorder=2)
-        ax.annotate(n + f"\n{value:.0f} ms", (x, y), xytext=(0, 28 if y >= 0 else -29),
-                    textcoords="offset points", ha="center",
-                    va="bottom" if y >= 0 else "top", fontsize=9, weight="semibold",
-                    zorder=5)
-    ax.set_title(title, fontsize=10, pad=12)
-    clean_axis(ax)
+        x1,y1=pos[a]; x2,y2=pos[b]
+        mag=abs(value)
+        ax.plot([x1,x2],[y1,y2], color=tone(value) if mag else "#D4D9DE",
+                lw=.55+6.6*mag/max(edge_max,1e-12) if mag else .65,
+                ls="-" if mag else ":", alpha=.85, solid_capstyle="round",zorder=1)
+    # Fixed label blocks, separate from the nodes and from edge values.
+    labels={0:(0.,1.53),1:(-1.22,-1.27),2:(1.22,-1.27),3:(0.,-.48)}
+    for i,(n,(x,y)) in enumerate(pos.items()):
+        v=times.get(n,0.)
+        # Area ~ |value|^1.7 (shared scale), with a small visible floor.
+        radius=.055+.295*(min(1.,abs(v)/max(time_max,1e-12))**.85)
+        ax.add_patch(Circle((x,y),radius,facecolor=tone(v) if v else "white",
+                            edgecolor="#52606C",lw=1.0,zorder=3))
+        label="Arc" if n in ("P","pricing") else n.title() if mode=="attribute" else n
+        lo,hi=ci_low.get(n),ci_high.get(n)
+        fmt=(lambda a:f"{a:+.0f}") if contrast else (lambda a:f"{a:.0f}")
+        ci=f"95% CI [{fmt(lo)}, {fmt(hi)}]" if lo is not None and hi is not None else "95% CI: NA"
+        lx,ly=labels[i]
+        ax.text(lx,ly,f"{label}  {fmt(v)} ms\n{ci}",ha="center",va="center",
+                fontsize=fontsize,color="#28333D",linespacing=1.18,zorder=5,
+                bbox=dict(fc="white",ec="none",pad=1.6,alpha=.96))
+    # Display exact transition values in a separate compact strip, not on edges.
+    def short(n):
+        return {"money":"M","rating":"R","distance":"D","pricing":"P"}.get(n,n)
+    bits=[]
+    for pair,val in edges.items():
+        a,b=pair.split("|")
+        bits.append(f"{short(a)}-{short(b)}: {val:+.2f}" if contrast else f"{short(a)}-{short(b)}: {val:.2f}")
+    lines=["   |   ".join(bits[i:i+3]) for i in range(0,len(bits),3)]
+    ax.text(0,-1.74,"\n".join(lines),ha="center",va="center",
+            fontsize=max(6,fontsize-1),color="#475569",linespacing=1.3)
+    ax.set_title(title,fontsize=fontsize+2,pad=8,weight="semibold")
+    if annotation:
+        ax.text(0,1.96,annotation,ha="center",va="center",fontsize=fontsize,
+                color="#4B5563",linespacing=1.15)
+    ax.set(xlim=(-1.93,1.93),ylim=(-2.02,2.20))
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+
+def group_record(mode,family,task,c,label,g,people,contrast=False,eligible_n=None):
+    """people is [(subject, (node means, edge means))]; paired if contrast."""
+    vals=[v for _,v in people]
+    t,lo,hi=mean_ci([a for a,b in vals])
+    e,elo,ehi=mean_ci([b for a,b in vals])
+    return dict(mode=mode,family=family,response_type=task,condition=c,condition_label=label,
+                n_subjects=len(people),n_eligible_subjects=int(eligible_n if eligible_n is not None else len(people)),
+                n_sessions=len(g),n_valid_trials=int(g.n_valid_trials.sum()),
+                mean_time_ms_json=js(t),mean_edge_count_json=js(e),
+                time_ci_low_json=js(lo),time_ci_high_json=js(hi),
+                edge_ci_low_json=js(elo),edge_ci_high_json=js(ehi),
+                attribute_subtype_counts=js(dict(Counter(g.attribute_condition))),
+                contrast="condition_minus_C1" if contrast else "absolute",
+                baseline_condition=1 if contrast else "")
+
+
+def plot_group_sets(out, groups, contrasts, dpi):
+    """Absolute and paired difference graphs, comparable within each scale."""
+    for contrast, recs, dirname in ((False,groups,"group_average"),(True,contrasts,"group_baseline_difference")):
+        root=out/dirname
+        if not recs:
+            continue
+        # Separate absolute and contrast scales; all panels within a set share scale.
+        tm=max([1.]+[abs(v) for r in recs for v in json.loads(r["mean_time_ms_json"]).values()])
+        em=max([1e-9]+[abs(v) for r in recs for v in json.loads(r["mean_edge_count_json"]).values()])
+        def panel(ax,r,title,fs=8):
+            if not r or r["n_subjects"]==0:
+                ax.axis("off")
+                ax.set_title(title,fontsize=fs+2)
+                ax.text(.5,.5,"No matched baseline" if contrast else "No valid data",transform=ax.transAxes,ha="center",va="center",fontsize=fs)
+                return
+            draw_average(ax,r["response_type"],r["mode"],json.loads(r["mean_time_ms_json"]),
+                         json.loads(r["mean_edge_count_json"]),title,tm,em,
+                         json.loads(r["time_ci_low_json"]),json.loads(r["time_ci_high_json"]),
+                         contrast,condition_annotation(r["family"],r["condition"]),fs)
+        legend=("Change vs own C1: blue + / rust - / hollow zero; size and width = magnitude; "
+                "node = mean change in ms/trial (95% CI); edge = change in transitions/trial"
+                if contrast else "Circle size = mean dwell ms/trial (expanded scale); edge width = mean transitions/trial; 95% CI across participants")
+        for r in recs:
+            if not r["n_subjects"]:
+                continue
+            fig,ax=plt.subplots(figsize=(6.1,6.3))
+            title=f"{r['response_type'].title()} | {r['condition_label']}\nN={r['n_subjects']}"
+            panel(ax,r,title,9)
+            fig.text(.5,.012,legend,ha="center",fontsize=7,wrap=True)
+            name=f"C{r['condition']}" if r["family"]=="abstract" else safe(r["condition"])
+            save_fig(fig,root/r["mode"]/r["family"]/r["response_type"]/f"{name}.png",dpi)
+        lookup={(r["mode"],r["response_type"],r["family"],r["condition"]):r for r in recs}
+        for mode in ("xyz","attribute"):
+            for include_pool in (False,True):
+                nc=6 if include_pool else 5
+                fig,axs=plt.subplots(2,nc,figsize=(4.65*nc,11),squeeze=False)
+                for i,task in enumerate(("choice","pricing")):
+                    for j in range(nc):
+                        family,c=("abstract",j+1) if j<5 else ("pooled","all")
+                        r=lookup.get((mode,task,family,c))
+                        name=f"C{c}" if j<5 else ("C2-C5 pooled" if contrast else "C1-C5 pooled")
+                        panel(axs[i,j],r,f"{task.title()} | {name}\nN={r['n_subjects'] if r else 0}",8)
+                fig.suptitle(f"{mode.upper()} | {'Paired differences from C1' if contrast else 'Group averages'}",fontsize=16,weight="semibold")
+                fig.subplots_adjust(left=.025,right=.985,bottom=.075,top=.91,wspace=.20,hspace=.30)
+                fig.text(.5,.025,legend,ha="center",fontsize=10)
+                save_fig(fig,root/f"{mode}_{'all_conditions' if include_pool else '10_conditions'}.png",dpi)
+        # Concrete attributes have up to 16 distinct configurations, not five.
+        for task in ("choice","pricing"):
+            cells=[r for r in recs if r["mode"]=="attribute" and r["family"]=="concrete" and r["response_type"]==task]
+            if not cells:
+                continue
+            nc=4; nr=math.ceil(len(cells)/nc)
+            fig,axs=plt.subplots(nr,nc,figsize=(4.8*nc,5.3*nr),squeeze=False)
+            for ax,r in zip(axs.flat,cells):
+                panel(ax,r,f"{task.title()} | N={r['n_subjects']}",8)
+            for ax in list(axs.flat)[len(cells):]:
+                ax.axis("off")
+            fig.suptitle(f"{task.title()} | actual attribute configurations | {'paired changes' if contrast else 'means'}",fontsize=15)
+            fig.subplots_adjust(left=.025,right=.985,bottom=.06,top=.94,wspace=.2,hspace=.30)
+            fig.text(.5,.02,legend,ha="center",fontsize=9)
+            save_fig(fig,root/f"attribute_concrete_{task}_all_conditions.png",dpi)
 
 
 def draw_trial(row, seq, ms, attrs, xyz, path, dpi):
@@ -294,7 +430,9 @@ def main():
         for mode in ("xyz","attribute"):
             t,e = avg_metrics(metrics[mode])
             session_metrics[(subject,order,mode)] = (t,e)
-            sessions.append(dict(**rec, mode=mode, mean_time_ms_json=js(t),mean_edge_count_json=js(e)))
+            _,lo,hi=mean_ci([a for a,b in metrics[mode]])
+            sessions.append(dict(**rec, mode=mode, mean_time_ms_json=js(t),mean_edge_count_json=js(e),
+                                 time_ci_low_json=js(lo),time_ci_high_json=js(hi)))
         print(f"{subject} session {order} ({task}): {n_valid}/{len(sdf)} valid trials", flush=True)
     save_csv(trial_rows,out/"trial_sequences.csv")
     save_csv(sessions,out/"session_graph_summary.csv")
@@ -303,28 +441,59 @@ def main():
     # then participants equally. Invalid design sessions remain in individual plots/CSV.
     records = pd.DataFrame(sessions)
     good = records[(records.condition_id>0)&(records.n_valid_trials>0)]
-    groups = []
+    groups, contrasts, paired_rows = [], [], []
     for mode in ("xyz","attribute"):
         subset = good[good["mode"]==mode]
-        families = [("abstract", "condition_id")]
-        if mode == "attribute":
+        def subject_metric(sg):
+            return avg_metrics([session_metrics[(r.subject_id,r.session_order,mode)]
+                                for r in sg.itertuples(index=False)])
+        baseline={(task,sub):subject_metric(sg)
+                  for (task,sub),sg in subset[subset.condition_id==1].groupby(["response_type","subject_id"])}
+        families=[("abstract","condition_id")]
+        if mode=="attribute":
             families.append(("concrete","attribute_condition"))
+        def add_group(task,family,c,g,people,label):
+            groups.append(group_record(mode,family,task,c,label,g,people))
+            paired=[]
+            for sub,(t,e) in people:
+                if (task,sub) not in baseline:
+                    continue
+                bt,be=baseline[(task,sub)]
+                dt,de=difference(t,bt),difference(e,be)
+                paired.append((sub,(dt,de)))
+                paired_rows.append(dict(subject_id=sub,mode=mode,response_type=task,family=family,
+                    condition=c,baseline_condition=1,delta_time_ms_json=js(dt),delta_edge_count_json=js(de)))
+            # Counts for paired result use only matched participants.
+            matched=g[g.subject_id.isin([sub for sub,_ in paired])]
+            contrasts.append(group_record(mode,family,task,c,label,matched,paired,True,len(people)))
         for family,key in families:
             for (task,c),g in subset.groupby(["response_type",key],sort=True):
-                participant_means = []
-                for _,sg in g.groupby("subject_id",sort=False):
-                    participant_means.append(avg_metrics([
-                        session_metrics[(r.subject_id,r.session_order,mode)]
-                        for r in sg.itertuples(index=False)
-                    ]))
-                t,e = avg_metrics(participant_means)
-                label = COND_LABEL[int(c)] if family=="abstract" else str(c).replace("__"," / ").replace("_"," ")
-                groups.append(dict(mode=mode,family=family,response_type=task,condition=c,
-                    condition_label=label,n_subjects=g.subject_id.nunique(),n_sessions=len(g),
-                    n_valid_trials=int(g.n_valid_trials.sum()),mean_time_ms_json=js(t),
-                    mean_edge_count_json=js(e),
-                    attribute_subtype_counts=js(dict(Counter(g.attribute_condition)))))
+                people=[(sub,subject_metric(sg)) for sub,sg in g.groupby("subject_id",sort=False)]
+                label=COND_LABEL[int(c)] if family=="abstract" else str(c).replace("__"," / ").replace("_"," ")
+                add_group(task,family,c,g,people,label)
+        # Pooled descriptive graph: average each observed C1-C5 condition equally within participant.
+        # Pooled contrast: average observed nonbaseline C2-C5 condition means, then subtract own C1.
+        for task,g in subset.groupby("response_type",sort=False):
+            def pooled_people(g):
+                return [(sub,avg_metrics([subject_metric(cg) for _,cg in sg.groupby("condition_id")]))
+                        for sub,sg in g.groupby("subject_id",sort=False)]
+            people=pooled_people(g)
+            groups.append(group_record(mode,"pooled",task,"all","C1-C5 pooled",g,people))
+            target=g[g.condition_id!=1]
+            people=pooled_people(target)
+            paired=[]
+            for sub,(t,e) in people:
+                if (task,sub) in baseline:
+                    bt,be=baseline[(task,sub)]
+                    dt,de=difference(t,bt),difference(e,be)
+                    paired.append((sub,(dt,de)))
+                    paired_rows.append(dict(subject_id=sub,mode=mode,response_type=task,family="pooled",
+                        condition="all",baseline_condition=1,delta_time_ms_json=js(dt),delta_edge_count_json=js(de)))
+            matched=target[target.subject_id.isin([sub for sub,_ in paired])]
+            contrasts.append(group_record(mode,"pooled",task,"all","C2-C5 pooled minus C1",matched,paired,True,len(people)))
     save_csv(groups,out/"group_graph_summary.csv")
+    save_csv(contrasts,out/"group_baseline_difference_summary.csv")
+    save_csv(paired_rows,out/"participant_baseline_differences.csv")
 
     # Common absolute visual scaling across all average graphs, not per-panel normalization.
     all_t = [v for rec in sessions+groups for v in json.loads(rec["mean_time_ms_json"]).values()]
@@ -336,43 +505,23 @@ def main():
     if not args.skip_session_plots:
         for (subject,order),g in records.groupby(["subject_id","session_order"],sort=False):
             r=g.iloc[0]; task=r.response_type
-            fig,axes=plt.subplots(1,2,figsize=(10,5.0))
+            fig,axes=plt.subplots(1,2,figsize=(12,6.6))
             for ax,mode in zip(axes,("xyz","attribute")):
                 t,e=session_metrics[(subject,order,mode)]
                 if t:
-                    draw_average(ax,task,mode,t,e,mode.upper(),st,se)
+                    rec=g[g["mode"]==mode].iloc[0]
+                    draw_average(ax,task,mode,t,e,mode.upper(),st,se,
+                                 json.loads(rec.time_ci_low_json),json.loads(rec.time_ci_high_json),
+                                 annotation=condition_annotation("abstract",r.condition_id) if r.condition_id else "Outside planned design")
                 else:
                     clean_axis(ax);ax.text(0,0,"No valid gaze trials",ha="center")
             fig.suptitle(f"Subject {subject} | session {int(order):02d} | {task} | "
                          f"C{r.condition_id if r.condition_id else 'NA'} | "
                          f"{r.n_valid_trials}/{r.n_trials} trials",fontsize=11)
-            fig.text(.5,.015,"Circle area: mean total dwell / trial (ms) | edge width: mean transitions / trial",ha="center",fontsize=8)
+            fig.text(.5,.015,"Circle size: mean dwell / trial (ms), 95% trial-level CI | edge width: mean transitions / trial",ha="center",fontsize=8)
             save_fig(fig,out/"subjects"/f"subject_{safe(subject)}"/f"session_{int(order):02d}_{task}"/"average.png",args.dpi)
     if not args.skip_group_plots:
-        for r in groups:
-            fig,ax=plt.subplots(figsize=(6,5.3))
-            title=f"{r['response_type']} | {r['condition_label']}\n"
-            title+=f"{r['n_subjects']} participants / {r['n_sessions']} sessions"
-            draw_average(ax,r["response_type"],r["mode"],json.loads(r["mean_time_ms_json"]),
-                         json.loads(r["mean_edge_count_json"]),title,gt,ge)
-            fig.text(.5,.01,"Dwell ms / trial | transitions / trial | equal participant weight",ha="center",fontsize=8)
-            name=(f"C{r['condition']}" if r["family"]=="abstract" else safe(r["condition"]))
-            save_fig(fig,out/"group_average"/r["mode"]/r["family"]/r["response_type"]/f"{name}.png",args.dpi)
-        # Two comparison sheets, each 2 tasks x 5 abstract conditions.
-        lookup={(r["mode"],r["response_type"],r["condition"]):r for r in groups if r["family"]=="abstract"}
-        for mode in ("xyz","attribute"):
-            fig,axes=plt.subplots(2,5,figsize=(22,9.5))
-            for i,task in enumerate(("choice","pricing")):
-                for j,c in enumerate(range(1,6)):
-                    ax=axes[i,j]; r=lookup.get((mode,task,c))
-                    if r:
-                        draw_average(ax,task,mode,json.loads(r["mean_time_ms_json"]),
-                                     json.loads(r["mean_edge_count_json"]),
-                                     f"{task} C{c}\nN={r['n_subjects']}",gt,ge)
-                    else:
-                        clean_axis(ax);ax.set_title(f"{task} C{c}\nNo valid data")
-            fig.suptitle(f"Group gaze graphs | {mode.upper()} | shared scale | equal participant weight",fontsize=15)
-            save_fig(fig,out/"group_average"/f"{mode}_10_conditions.png",args.dpi)
+        plot_group_sets(out,groups,contrasts,args.dpi)
     print(f"Done: {len(trial_rows)} trials; {len(records)//2} sessions; {len(groups)} group cells -> {out}")
 
 if __name__ == "__main__":
